@@ -47,9 +47,11 @@ class Hyperparams(DataStorage):
     fp16:               bool  = False
     ent_min_mention:    int   = 0
     entity_loss_weight: bool  = False
+    bert_attention:     bool  = False
 
     subfolder = None  # Set at runtime
     json_name = "params.json"
+    ignore_fp16_cuda_access = False
 
     def __post_init__(self):
         # Test parameter validity
@@ -62,7 +64,7 @@ class Hyperparams(DataStorage):
         assert 0 <= self.warmup_prop < 1
         assert 0 <= self.word_ent_weight <= 1
         assert isinstance(self.fp16, bool)
-        if self.fp16:
+        if self.fp16 and not self.ignore_fp16_cuda_access:
             assert torch.cuda.is_available(), "Half-precision cannot be used without CUDA access"
         assert isinstance(self.ent_min_mention, int) and self.ent_min_mention >= 0
 
