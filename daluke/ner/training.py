@@ -12,6 +12,8 @@ from .data import Split, NERDataset
 
 @dataclass
 class TrainResults(DataStorage):
+    d_losses: list[float]
+    c_losses: list[float]
     losses: list[float]
     running_evaluations: list[NER_Results]
     pred_distributions: list[dict[str, int]]
@@ -63,23 +65,40 @@ class TrainNER:
                 # Do count on the non-padded labels
                 for label, count in zip(*e.entities.labels[:e.entities.N].unique(return_counts=True)):
                     counts[label] += count
-        self.criterion = nn.CrossEntropyLoss(ignore_index=-1, weight=1/counts if loss_weight else None)
+
+        self.discriminator_criterion = nn.BCELoss()
+        self.classifier_criterion = nn.CrossEntropyLoss(ignore_index=-1, weight=1/counts[1:].to(device) if loss_weight else None)
 
     def run(self):
         self.model.train()
-        res = TrainResults(losses=list(), running_evaluations=list(), pred_distributions=list(), true_type_distribution=dict())
+        res = TrainResults(
+            d_losses = list(),
+            c_losses = list(),
+            losses   = list(),
+            running_evaluations    = list(),
+            pred_distributions     = list(),
+            true_type_distribution = dict(),
+        )
         for i in range(self.epochs):
             for j, batch in enumerate(self.dataloader):
-                scores = self.model(batch)
-                loss = self.criterion(scores.view(-1, self.model.output_shape), batch.entities.labels.view(-1))
+                discriminator_out, class_scores, is_ent = self.model(batch)
+                d_loss = self.discriminator_criterion(discriminator_out, (batch.entities.labels != 0).to(torch.float32).unsqueeze(2))
+                c_loss = self.classifier_criterion(class_scores, batch.entities.labels.view(-1)[is_ent]-1)
+                # Set nan loss to 0. Happens when no entities in batch
+                if torch.isnan(c_loss):
+                    loss = d_loss
+                else:
+                    loss = d_loss + c_loss
                 loss.backward()
 
                 self.optimizer.step()
                 self.scheduler.step()
                 self.model.zero_grad()
 
+                res.d_losses.append(d_loss.item())
+                res.c_losses.append(c_loss.item())
                 res.losses.append(loss.item())
-                log.debug(f"Epoch {i} / {self.epochs-1}, batch: {j} / {len(self.dataloader)-1}. LR: {self.scheduler.get_last_lr()[0]:.2e} Loss: {loss.item():.5f}.")
+                log.debug(f"Epoch {i} / {self.epochs-1}, batch: {j} / {len(self.dataloader)-1}. LR: {self.scheduler.get_last_lr()[0]:.2e}. DLoss: {d_loss.item()}. CLoss: {c_loss.item():.5f}. Loss: {loss.item():.5f}.")
             # Perform running evaluation
             if self.dev_dataloader is not None:
                 log("Evaluating on development set ...")

@@ -12,6 +12,7 @@ import torch.nn.functional as F
 from seqeval.metrics import classification_report
 
 from pelutils import DataStorage, log
+from pelutils.ds import no_grad
 
 from daluke.ner.model import span_probs_to_preds
 from daluke.ner.data import NERDataset, Split
@@ -29,15 +30,20 @@ class NER_Results(DataStorage):
 
     subfolder = "eval-results"
 
+@no_grad
 def evaluate_ner(model: nn.Module, dataloader: torch.utils.data.DataLoader, dataset: NERDataset, device: torch.device, split: Split, also_no_misc=True) -> NER_Results:
     model.eval()
     annotations, texts = dataset.annotations[split], dataset.texts[split]
     span_probs: list[dict[tuple[int, int], np.ndarray]] = list(dict() for _ in range(len(texts)))
     log.debug(f"Forward passing {len(dataloader)} batches")
     for batch in tqdm(dataloader):
-        with torch.no_grad():
-            scores = model(batch)
-        probs = F.softmax(scores, dim=2)
+        discriminator_out, scores, _ = model(batch)
+        non_null_probs = torch.stack(4*[torch.squeeze(discriminator_out, dim=2)]).permute(1, 2, 0)
+        class_probs = non_null_probs * F.softmax(scores, dim=2)
+        probs = torch.empty((scores.shape[0], scores.shape[1], scores.shape[2]+1))
+        probs[..., 0] = 1 - discriminator_out.squeeze()
+        probs[..., 1:] = class_probs
+
         # We save probability distribution, for every possible span in the example
         for idx, (i, spans) in zip(batch.text_nums, enumerate(batch.entities.fullword_spans)):
             span_probs[idx].update({

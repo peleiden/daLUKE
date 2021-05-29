@@ -27,10 +27,15 @@ class NERDaLUKE(DaLUKE):
         super().__init__(bert_config, ent_vocab_size, ent_embed_size)
         self.output_shape = output_shape
 
+        self.feature_size = 3 * bert_config.hidden_size
         self.drop = nn.Dropout(bert_config.hidden_dropout_prob)
-        self.classifier = nn.Linear(bert_config.hidden_size*3, self.output_shape)
+        self.discriminator = nn.Sequential(
+            nn.Linear(self.feature_size, 1),
+            nn.Sigmoid(),
+        )
+        self.classifier = nn.Linear(self.feature_size, self.output_shape-1)
 
-    def forward(self, ex: NERBatchedExamples) -> torch.Tensor:
+    def forward(self, ex: NERBatchedExamples) -> tuple[torch.Tensor, 3]:
         """
         Classify NER by passing the word and entity id's through the encoder
         and running the linear classifier on the output
@@ -41,7 +46,18 @@ class NERDaLUKE(DaLUKE):
         start_word_representations, end_word_representations = self.collect_start_and_ends(word_representations, ex)
         features = torch.cat([start_word_representations, end_word_representations, ent_representations], dim=2)
         features = self.drop(features)
-        return self.classifier(features)
+
+        discriminator_out = self.discriminator(features)
+        if self.training:
+            # When training, consider only examples that are not and padding or null labels
+            is_ent = ex.entities.labels.view(-1) > 0
+            entity_features = features.view(-1, self.feature_size)[is_ent]
+        else:
+            # When evaluating, also consider what the discriminator thinks
+            entity_features = features
+            is_ent = None
+
+        return discriminator_out, self.classifier(entity_features), is_ent
 
     @staticmethod
     def collect_start_and_ends(word_representations: torch.Tensor, ex: NERBatchedExamples) -> tuple[torch.Tensor, torch.Tensor]:
