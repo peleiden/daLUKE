@@ -1,6 +1,6 @@
 #!/usr/bin/sh
 MODELPATH=/work3/s183912/pdata2/johnny-charlie
-OUTPATH=/work3/s183911/progress
+OUTPATH=/work3/$USER/progress
 
 FILES=`ls $MODELPATH/daluke_epoch*.pt`
 for F in $FILES
