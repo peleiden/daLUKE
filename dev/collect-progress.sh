@@ -2,9 +2,10 @@
 MODELPATH=/work3/s183912/pdata2/johnny-charlie
 OUTPATH=/work3/s183911/progress
 
-for i in -1 9 24
+FILES=`ls $MODELPATH/daluke_epoch*.pt`
+for F in $FILES
 do
-    P=$MODELPATH/daluke_epoch$i
-    echo $P
-    python -m daluke.collect_modelfile "${P}.pt" "${OUTPATH}${i}.tar.gz"
+    EPOCH=`echo $F | cut -c 50-$((${#F}-3))`
+    echo $EPOCH
+    python -m daluke.collect_modelfile $F "${OUTPATH}/main_epoch${EPOCH}.tar.gz"
 done
