@@ -13,6 +13,9 @@ from daluke.ner.training import TrainNER, TrainResults
 from daluke.ner.data import Split
 from daluke.ner.evaluation import type_distribution
 
+from daluke.pretrain.model import load_base_model_weights, PretrainTaskDaLUKE
+from transformers import AutoConfig, AutoModelForPreTraining, AdamW, get_polynomial_decay_schedule_with_warmup
+
 DATASET_ARGUMENTS = {
     "dataset":    {"default": "DaNE", "help": "Which dataset to use. Currently, only DaNE supported"},
     "wikiann-path":
@@ -61,7 +64,20 @@ def run_experiment(args: dict[str, Any]):
     set_seeds(seed=args["seed"])
     assert not (args["words_only"] and args["entities_only"]), "--words-only and --entities-only cannot be used together"
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
     entity_vocab, metadata, state_dict = load_from_archive(args["model"])
+    bert_config = AutoConfig.from_pretrained(metadata["base-model"])
+    model = PretrainTaskDaLUKE(
+        bert_config,
+        ent_vocab_size = len(entity_vocab),
+        ent_embed_size = 256,
+    ).to(device)
+    model.apply(lambda module: model.init_weights(module, bert_config.initializer_range))
+    # Load parameters from base model
+    base_model = AutoModelForPreTraining.from_pretrained(metadata["base-model"])
+    new_weights = load_base_model_weights(model, base_model, False)
+
+    state_dict = model.state_dict()
     state_dict, ent_embed_size = mutate_for_ner(state_dict, mask_id=entity_vocab["[MASK]"]["id"])
 
     # Add new NER specific fields to metadata
