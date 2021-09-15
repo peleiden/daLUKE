@@ -25,6 +25,7 @@ ARGUMENTS = {
     "lr":                 { "default": Hyperparams.lr,                 "type": float, "help": "Initial learning rate" },
     "ff-size":            { "default": Hyperparams.ff_size,            "type": int,   "help": "Size of each feed forward" },
     "ent-embed-size":     { "default": Hyperparams.ent_embed_size,     "type": int,   "help": "Dimension of the entity embeddings" },
+    "ent-hidden-size":    { "default": Hyperparams.ent_hidden_size,    "type": int,   "help": "Dimension of entity representations" },
     "weight-decay":       { "default": Hyperparams.weight_decay,       "type": float, "help": "The decay factor in the AdamW optimizer" },
     "warmup-prop":        { "default": Hyperparams.warmup_prop,        "type": float, "help": "Proportion of training steps used for optimizer warmup" },
     "word-ent-weight":    { "default": Hyperparams.word_ent_weight,    "type": float, "help": "0 for only entities, 1 for only words, 0.5 for equal weighting" },

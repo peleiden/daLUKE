@@ -1,13 +1,9 @@
 from __future__ import annotations
 from collections import OrderedDict
-from pprint import pformat
-from typing import Callable
 
 import torch
 from torch import nn
 
-from pelutils import log
-from transformers import AutoTokenizer, AutoModelForPreTraining
 from transformers.activations import get_activation
 from transformers.models.bert.modeling_bert import (
     BertConfig,

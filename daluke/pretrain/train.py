@@ -41,6 +41,7 @@ class Hyperparams(DataStorage):
     lr:                 float = 1e-4
     ff_size:            int   = 16
     ent_embed_size:     int   = 256
+    ent_hidden_size:    int | None = None
     weight_decay:       float = 0.01
     warmup_prop:        float = 0.06
     word_ent_weight:    float = 0.5
@@ -55,6 +56,7 @@ class Hyperparams(DataStorage):
     ent_mask_prob:      float = 0.15
     lukeinit:           bool  = False
     no_base_model:      bool  = False
+    pca_query_init:     bool  = False
 
     subfolder = None  # Set at runtime
     json_name = "params.json"
@@ -65,6 +67,11 @@ class Hyperparams(DataStorage):
         assert self.epochs > 0
         assert self.lr > 0, "Learning rate must be larger than 0"
         assert isinstance(self.ent_embed_size, int) and self.ent_embed_size > 0
+        assert self.ent_hidden_size is None or isinstance(self.ent_hidden_size, int) and self.ent_hidden_size > 0
+        if isinstance(self.ent_hidden_size, int):
+            assert not self.bert_attention, "When using BERT attention, entity hidden size cannot be specified"
+            if not self.no_base_model:
+                assert self.pca_query_init, "When using a base model and a different entity hidden size, PCA must be enabled"
         assert isinstance(self.batch_size, int) and self.batch_size > 0
         assert isinstance(self.ff_size, int) and 0 < self.ff_size <= self.batch_size
         assert 0 <= self.weight_decay < 1
@@ -279,6 +286,15 @@ def train(
     # Build model, possibly by loading previous weights
     log.section("Setting up model ...")
     bert_config = AutoConfig.from_pretrained(metadata["base-model"])
+    if params.ent_hidden_size is None:
+        params.ent_hidden_size = bert_config.hidden_size
+    else:
+        assert params.ent_hidden_size <= bert_config.hidden_size,\
+            "Entity hidden size (%i) cannot be larger than hidden size in '%s' (%i)" % (
+                params.hidden_size,
+                metadata["base-model"],
+                bert_config.hidden_size,
+            )
     assert bert_config.max_position_embeddings == metadata["max-seq-length"],\
         f"Model should respect sequence length; embeddings are of lenght {bert_config.max_position_embeddings}, "\
         f"but max. seq. len. is set to {metadata['max-seq-length']}"
@@ -290,6 +306,7 @@ def train(
         bert_config,
         ent_vocab_size = len(entity_vocab),
         ent_embed_size = params.ent_embed_size,
+        ent_hidden_size = params.ent_hidden_size,
     ).to(device)
     if params.lukeinit:
         model.apply(lambda module: model.init_weights(module, bert_config.initializer_range))
@@ -304,7 +321,7 @@ def train(
     # Initialize self-attention query matrices to BERT word query matrices
     q_mat_keys = set()
     if not params.bert_attention and not params.no_base_model:
-        q_mat_keys = model.init_queries()
+        q_mat_keys = model.init_queries(params.pca_query_init, params.entity_hidden_size)
     if not resume:
         res.luke_exclusive_params = new_weights
         res.q_mats_from_base = q_mat_keys
@@ -343,8 +360,8 @@ def train(
         optimizer,
         int(params.warmup_prop * num_updates_all),
         num_updates_all,
-        lr_end = params.lr / 10,
-        power  = 3 ** 0.5,
+        lr_end = params.lr / 100,
+        power  = 2.5 ** 0.5,
     )
     if resume:
         optimizer.load_state_dict(torch.load(fpath((TrainResults.subfolder, OPTIMIZER_OUT.format(i=res.epoch))), map_location=device))

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import torch
+from torch.autograd.grad_mode import no_grad
 import torch.nn.functional as F
 from torch import nn
 from transformers.models.bert.modeling_bert import (
@@ -37,6 +38,7 @@ class DaLUKE(nn.Module):
         bert_config: BertConfig,
         ent_vocab_size: int,
         ent_embed_size: int,
+        ent_hidden_size: int,
     ):
         """
         bert_config:    Used for the BERT Pooler
@@ -48,7 +50,7 @@ class DaLUKE(nn.Module):
         self.word_embeddings   = BertEmbeddings(bert_config)
         self.entity_embeddings = EntityEmbeddings(bert_config, ent_vocab_size, self.ent_embed_size)
         self.encoder = nn.ModuleList(
-            [EntityAwareLayer(bert_config) for _ in range(bert_config.num_hidden_layers)]
+            [EntityAwareLayer(bert_config, ent_hidden_size) for _ in range(bert_config.num_hidden_layers)]
         )
 
     def forward(self, ex: BatchedExamples) -> tuple[torch.Tensor, torch.Tensor]:
@@ -66,7 +68,25 @@ class DaLUKE(nn.Module):
             word_hidden, entity_hidden = encode(word_hidden, entity_hidden, attention_mask)
         return word_hidden, entity_hidden
 
-    def init_queries(self) -> set[str]:
+    @staticmethod
+    def _init_queries_pca(h: int, Q: torch.FloatTensor) -> tuple[torch.FloatTensor, 3]:
+        Q = Q.T.contiguous()
+        mu = Q.mean(dim=1)
+        Q_c = Q - mu
+        cov = Q_c.T @ Q_c / (Q_c.shape[1] - 1)
+        lambdas, V = torch.linalg.eigh(cov)
+        lambdas, V = lambdas[::-1], V.flip(dims=(1,))
+        Q_w2e = V[:, :h].T @ Q_c
+        Q_e2w = Q_w2e.T
+
+        cov = Q_e2w @ Q_w2e / (Q_e2w.shape[1] - 1)
+        lambdas, V = torch.linalg.eigh(cov)
+        lambdas, V = lambdas[::-1], V.flip(dims=(1,))
+        Q_e = V[:, :h].T @ Q_e2w
+
+        return Q_e.detach().clone(), Q_w2e.detach().clone(), Q_e2w.detach().clone()
+
+    def init_queries(self, pca: bool, entity_hidden_size: int) -> set[str]:
         """
         As the attention layers of DaLUKE have four query matrices and the BERT-based transformers only have one,
         we might want to init the other three to this one word-to-word query matrix
@@ -74,12 +94,17 @@ class DaLUKE(nn.Module):
         """
         keys = set()
         for i, layer in enumerate(self.encoder):
-            layer.attention.Q_e.weight.data = layer.attention.Q_w.weight.data.detach().clone()
-            layer.attention.Q_w2e.weight.data = layer.attention.Q_w.weight.data.detach().clone()
-            layer.attention.Q_e2w.weight.data = layer.attention.Q_w.weight.data.detach().clone()
+            if pca:
+                Q_e, Q_w2e, Q_e2w = self._init_queries_pca(entity_hidden_size, layer.attention.Q_w.data.detach().clone())
+            else:
+                Q_e, Q_w2e, Q_e2w = (layer.attention.Q_w.weight.data.detach().clone() for _ in range(3))
+            layer.attention.Q_e.weight.data = Q_e
+            layer.attention.Q_w2e.weight.data = Q_w2e
+            layer.attention.Q_e2w.weight.data = Q_e2w
 
-            layer.attention.Q_e.bias.data = layer.attention.Q_w.bias.data.detach().clone()
-            layer.attention.Q_w2e.bias.data = layer.attention.Q_w.bias.data.detach().clone()
+            if not pca:
+                layer.attention.Q_e.bias.data = layer.attention.Q_w.bias.data.detach().clone()
+                layer.attention.Q_w2e.bias.data = layer.attention.Q_w.bias.data.detach().clone()
             layer.attention.Q_e2w.bias.data = layer.attention.Q_w.bias.data.detach().clone()
 
             for key in "Q_e", "Q_w2e", "Q_e2w":
@@ -110,14 +135,19 @@ class EntityAwareLayer(nn.Module):
     """
     Transformer layer where the attention is replaced by the entity-aware method
     """
-    def __init__(self, bert_config: BertConfig):
+    def __init__(self, bert_config: BertConfig, ent_hidden_size: int):
         super().__init__()
-        self.attention    = EntitySelfAttention(bert_config.hidden_size, bert_config.num_attention_heads, bert_config.attention_probs_dropout_prob)
+        self.attention    = EntitySelfAttention(
+            bert_config.hidden_size,
+            bert_config.num_attention_heads,
+            bert_config.attention_probs_dropout_prob,
+            ent_hidden_size,
+        )
         self.self_output  = BertSelfOutput(bert_config)
         self.intermediate = BertIntermediate(bert_config)
         self.output       = BertOutput(bert_config)
 
-    def forward(self, word_hidden: torch.Tensor, entity_hidden: torch.Tensor, attention_mask: torch.Tensor) -> (torch.Tensor, torch.Tensor):
+    def forward(self, word_hidden: torch.Tensor, entity_hidden: torch.Tensor, attention_mask: torch.Tensor) -> tuple[torch.Tensor, 2]:
         word_size = word_hidden.size(1)
         total_hidden = torch.cat((word_hidden, entity_hidden), dim=1)
         self_attention = self.attention(word_hidden, entity_hidden, attention_mask)
@@ -130,7 +160,7 @@ class EntitySelfAttention(nn.Module):
     """
     As LUKE uses both entities and words, this self-attention takes the token type into account.
     """
-    def __init__(self, hidden_size: int, num_heads: int, drop_prob: float):
+    def __init__(self, hidden_size: int, num_heads: int, drop_prob: float, ent_hidden_size: int):
         """
         Sets up the four query matrices used in the Entity-aware Self-attention:
             Q_w used between two words
@@ -141,6 +171,7 @@ class EntitySelfAttention(nn.Module):
         """
         super().__init__()
         self.num_heads = num_heads
+        # TODO Figure this shit out
         self.head_size = hidden_size // num_heads
 
         # Four query matrices, the key and the value
